@@ -35,6 +35,8 @@ Boston, MA  02110-1301, USA.
 #include "wspr.h"
 #include "ext_int.h"
 #include "shmem.h"
+#include "rx_noise.h"
+#include "wdsp.h"
 
 #ifdef DRM
  #include "DRM.h"
@@ -49,7 +51,6 @@ Boston, MA  02110-1301, USA.
 #include <sched.h>
 #include <math.h>
 #include <signal.h>
-#include <fftw3.h>
 
 // copy admin-related configuration from kiwi.json to new admin.json file
 void cfg_adm_transition()
@@ -123,9 +124,9 @@ int S_meter_cal;
 double ui_srate, freq_offset;
 int sdr_hu_lo_kHz, sdr_hu_hi_kHz;
 
-#define DC_OFFSET_DEFAULT -0.02
-#define DC_OFFSET_DEFAULT_PREV 0.05
-#define DC_OFFSET_DEFAULT_20kHz -0.034
+#define DC_OFFSET_DEFAULT -0.02F
+#define DC_OFFSET_DEFAULT_PREV 0.05F
+#define DC_OFFSET_DEFAULT_20kHz -0.034F
 TYPEREAL DC_offset_I, DC_offset_Q;
 
 #define WATERFALL_CALIBRATION_DEFAULT -13
@@ -219,6 +220,7 @@ void update_vars_from_config()
     cfg_default_bool("ADC_clk_corr", true, &update_cfg);
     cfg_default_string("tdoa_id", "", &update_cfg);
     cfg_default_int("tdoa_nchans", -1, &update_cfg);
+    cfg_default_int("ext_api_nchans", -1, &update_cfg);
     cfg_default_bool("no_wf", false, &update_cfg);
     cfg_default_bool("test_webserver_prio", false, &update_cfg);
     cfg_default_bool("test_deadline_update", false, &update_cfg);
@@ -305,8 +307,9 @@ void update_vars_from_config()
     admcfg_default_bool("no_dup_ip", false, &update_admcfg);
     admcfg_default_bool("my_kiwi", true, &update_admcfg);
     admcfg_default_bool("onetime_password_check", false, &update_admcfg);
+    admcfg_default_string("proxy_server", "proxy.kiwisdr.com", &update_admcfg);
 
-    // decouple kiwisdr.com/public and sdr.hu registration
+    // decouple rx.kiwisdr.com and sdr.hu registration
     bool sdr_hu_register = admcfg_bool("sdr_hu_register", NULL, CFG_REQUIRED);
 	admcfg_bool("kiwisdr_com_register", &err, CFG_OPTIONAL);
     // never set or incorrectly set to false by v1.365,366
@@ -529,7 +532,7 @@ void webserver_collect_print_stats(int print)
 		
 		// SND and/or WF connections that have failed to follow API
 		#define NO_API_TIME 20
-		if (!c->snd_cmd_recv_ok && !c->wf_cmd_recv_ok && (now - c->arrival) >= NO_API_TIME) {
+		if (c->auth && (!c->snd_cmd_recv_ok && !c->wf_cmd_recv_ok && (now - c->arrival) >= NO_API_TIME)) {
             clprintf(c, "\"%s\"%s%s%s%s incomplete connection kicked\n",
                 c->user? c->user : "(no identity)", c->isUserIP? "":" ", c->isUserIP? "":c->remote_ip,
                 c->geo? " ":"", c->geo? c->geo:"");
@@ -541,7 +544,7 @@ void webserver_collect_print_stats(int print)
 	current_nusers = nusers;
 
 	// construct cpu stats response
-	#define NCPU 2
+	#define NCPU 4
 	int usi[3][NCPU], del_usi[3][NCPU];
 	static int last_usi[3][NCPU];
 
@@ -553,11 +556,17 @@ void webserver_collect_print_stats(int print)
 	char *reply = read_file_string_reply("/proc/stat");
 	
 	if (reply != NULL) {
-		int n = sscanf(kstr_sp(reply), "%*[^\n]\ncpu0 %d %*d %d %d %*[^\n]\ncpu1 %d %*d %d %d",
-		    &usi[0][0], &usi[1][0], &usi[2][0], &usi[0][1], &usi[1][1], &usi[2][1]);
-		assert(n == 3 || n == 6);
-		int ncpu = (n == 3)? 1:2;
-		kstr_free(reply);
+		int ncpu;
+		char *cpu_ptr = kstr_sp(reply);
+		for (ncpu = 0; ncpu < NCPU; ncpu++) {
+			char buf[10];
+			sprintf(buf, "cpu%d", ncpu);
+			cpu_ptr = strstr(cpu_ptr, buf);
+			if (cpu_ptr == nullptr)
+				break;
+			sscanf(cpu_ptr + 4, " %d %*d %d %d", &usi[0][ncpu], &usi[1][ncpu], &usi[2][ncpu]);
+		}
+
 		for (i = 0; i < ncpu; i++) {
             del_usi[0][i] = lroundf((float)(usi[0][i] - last_usi[0][i]) / secs);
             del_usi[1][i] = lroundf((float)(usi[1][i] - last_usi[1][i]) / secs);
@@ -565,9 +574,10 @@ void webserver_collect_print_stats(int print)
             //printf("CPU%d %.1fs u=%d%% s=%d%% i=%d%%\n", i, secs, del_usi[0][i], del_usi[1][i], del_usi[2][i]);
         }
 		
+		kstr_free(reply);
 	    int cpufreq_kHz = 1000000, temp_deg_mC = 0;
 
-#ifdef CPU_AM5729
+#if defined(CPU_AM5729) || defined(CPU_BCM2837)
 	    reply = read_file_string_reply("/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_cur_freq");
 		sscanf(kstr_sp(reply), "%d", &cpufreq_kHz);
 		kstr_free(reply);
@@ -695,9 +705,11 @@ char *rx_users(bool include_ip)
                 char *geo = c->geo? kiwi_str_encode(c->geo) : NULL;
                 char *ext = ext_users[i].ext? kiwi_str_encode((char *) ext_users[i].ext->name) : NULL;
                 const char *ip = include_ip? c->remote_ip : "";
-                asprintf(&sb2, "%s{\"i\":%d,\"n\":\"%s\",\"g\":\"%s\",\"f\":%d,\"m\":\"%s\",\"z\":%d,\"t\":\"%d:%02d:%02d\",\"rt\":%d,\"rn\":%d,\"rs\":\"%d:%02d:%02d\",\"e\":\"%s\",\"a\":\"%s\"}",
+                asprintf(&sb2, "%s{\"i\":%d,\"n\":\"%s\",\"g\":\"%s\",\"f\":%d,\"m\":\"%s\",\"z\":%d,\"t\":\"%d:%02d:%02d\","
+                    "\"rt\":%d,\"rn\":%d,\"rs\":\"%d:%02d:%02d\",\"e\":\"%s\",\"a\":\"%s\",\"c\":%.1f}",
                     need_comma? ",":"", i, user? user:"", geo? geo:"", c->freqHz,
-                    kiwi_enum2str(c->mode, mode_s, ARRAY_LEN(mode_s)), c->zoom, hr, min, sec, rtype, rn, r_hr, r_min, r_sec, ext? ext:"", ip);
+                    kiwi_enum2str(c->mode, mode_s, ARRAY_LEN(mode_s)), c->zoom, hr, min, sec,
+                    rtype, rn, r_hr, r_min, r_sec, ext? ext:"", ip, wdsp_SAM_carrier(i));
                 if (user) free(user);
                 if (geo) free(geo);
                 if (ext) free(ext);

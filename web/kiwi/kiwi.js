@@ -9,10 +9,10 @@ var kiwi = {
    GPS_fixes: 0,
    wf_fps: 0,
    inactivity_panel: false,
-   is_BBAI: 0,
+   is_multi_core: 0,
    
    // must match rx_cmd.cpp
-   modes_l: [ 'am', 'amn', 'usb', 'lsb', 'cw', 'cwn', 'nbfm', 'iq', 'drm', 'usn', 'lsn' ],
+   modes_l: [ 'am', 'amn', 'usb', 'lsb', 'cw', 'cwn', 'nbfm', 'iq', 'drm', 'usn', 'lsn', 'sam', 'sal', 'sau', 'sas' ],
    modes_u: [],
    modes_s: {},
    
@@ -530,7 +530,7 @@ function time_display_setup(ext_name_or_id)
 		) +
 		w3_div('id-time-display-logo-inner',
 			w3_div('id-time-display-logo-text', 'Powered by'),
-			'<a href="http://openwebrx.org/" target="_blank"><img id="id-time-display-logo" src="gfx/openwebrx-top-logo.png" /></a>'
+			'<a href="https://github.com/ha7ilm/openwebrx" target="_blank"><img id="id-time-display-logo" src="gfx/openwebrx-top-logo.png" /></a>'
 		);
 
 	time_display(time_display_current);
@@ -1100,7 +1100,7 @@ function admin_stats_cb(audio_dropped, underruns, seq_errors, dp_resets, dp_hist
 function kiwi_too_busy(rx_chans)
 {
 	var s = 'Sorry, the KiwiSDR server is too busy right now ('+ rx_chans+((rx_chans>1)? ' users':' user') +' max). <br>' +
-	'Please check <a href="http://kiwisdr.com/public" target="_self">kiwisdr.com/public</a> for more KiwiSDR receivers available world-wide.';
+	'Please check <a href="http://rx.kiwisdr.com" target="_self">rx.kiwisdr.com</a> for more KiwiSDR receivers available world-wide.';
 	kiwi_show_msg(s);
 }
 
@@ -1108,10 +1108,10 @@ function kiwi_exclusive_use()
 {
 	var s = 'Sorry, this Kiwi has been locked for special use. <br>' +
 	'This happens when using an extension (e.g. DRM decoder) that requires all available resources. <br>' +
-	'Please check <a href="http://kiwisdr.com/public" target="_self">kiwisdr.com/public</a> for more KiwiSDR receivers available world-wide. <br><br>' +
+	'Please check <a href="http://rx.kiwisdr.com" target="_self">rx.kiwisdr.com</a> for more KiwiSDR receivers available world-wide. <br><br>' +
 	'申し訳ありませんが、このキーウィは特別な使用のためにロックされています。 <br>' +
 	'これは、利用可能なすべてのリソースを必要とする拡張機能（DRM デコーダーなど）を使用している場合に発生します。 <br>' +
-	'世界中で利用できる KiwiSDR レシーバーについては、<a href="http://kiwisdr.com/public" target="_self">kiwisdr.com/public</a> を確認してください。';
+	'世界中で利用できる KiwiSDR レシーバーについては、<a href="http://rx.kiwisdr.com" target="_self">rx.kiwisdr.com</a> を確認してください。';
 	kiwi_show_msg(s);
 }
 
@@ -1144,9 +1144,15 @@ function kiwi_24hr_ip_limit(mins, ip)
 {
 	var s = 'Sorry, this KiwiSDR can only be used for '+ mins +' minutes every 24 hours by each IP address.<br>' +
       //'Your IP address is: '+ ip +'<br>' +
-      'Please check <a href="http://kiwisdr.com/public" target="_self">kiwisdr.com/public</a> for more KiwiSDR receivers available world-wide.';
+      'Please check <a href="http://rx.kiwisdr.com" target="_self">rx.kiwisdr.com</a> for more KiwiSDR receivers available world-wide.';
 	
 	kiwi_show_error_ask_exemption(s);
+}
+
+function kiwi_password_entry_timeout()
+{
+   var s = 'Timeout. Please reload page to continue.';
+	kiwi_show_msg(s);
 }
 
 function kiwi_up(up)
@@ -1166,7 +1172,7 @@ function kiwi_down(type, comp_ctr, reason)
 
 	if (type == 1) {
 		s = 'Sorry, software update in progress. Please check back in a few minutes.<br>' +
-			'Or check <a href="http://kiwisdr.com/public" target="_self">kiwisdr.com/public</a> for more KiwiSDR receivers available world-wide.';
+			'Or check <a href="http://rx.kiwisdr.com" target="_self">rx.kiwisdr.com</a> for more KiwiSDR receivers available world-wide.';
 		
 		if (comp_ctr > 0 && comp_ctr < 9000)
 			s += '<br>Build: compiling file #'+ comp_ctr;
@@ -1185,7 +1191,7 @@ function kiwi_down(type, comp_ctr, reason)
 	} else {
 		if (reason == null || reason == '') {
 			reason = 'Sorry, this KiwiSDR server is being used for development right now. <br>' +
-				'Please check <a href="http://kiwisdr.com/public" target="_self">kiwisdr.com/public</a> for more KiwiSDR receivers available world-wide.';
+				'Please check <a href="http://rx.kiwisdr.com" target="_self">rx.kiwisdr.com</a> for more KiwiSDR receivers available world-wide.';
 		}
 		s = reason;
 	}
@@ -1271,7 +1277,11 @@ function cpu_stats_cb(o, uptime_secs, ecpu, waterfall_fps)
       first = false;
    }
    var cpus = 'cpu';
-   if (o.cu.length > 1) cpus += '0 cpu1';
+   if (o.cu.length > 1) {
+      cpus += '0';
+		for (var i = 1; i < o.cu.length; i++)
+		   cpus += ' cpu' + i;
+   }
 	kiwi_cpu_stats_str_long =
 	   w3_inline('',
          w3_text('w3-text-black', 'Beagle: '+ cpus +' '+ user +' usr | '+ sys +' sys | '+ idle +' idle,' + (cputempC? '':' ')) +
@@ -1338,7 +1348,7 @@ function config_cb(rx_chans, gps_chans, serno, pub, port_ext, pvt, port_int, nm,
 	}
 }
 
-function update_cb(pending, in_progress, rx_chans, gps_chans, vmaj, vmin, pmaj, pmin, build_date, build_time)
+function update_cb(fs_full, pending, in_progress, rx_chans, gps_chans, vmaj, vmin, pmaj, pmin, build_date, build_time)
 {
 	config_str_update(rx_chans, gps_chans, vmaj, vmin);
 
@@ -1347,6 +1357,9 @@ function update_cb(pending, in_progress, rx_chans, gps_chans, vmaj, vmin, pmaj, 
 	if (msg_update) {
 		var s;
 		s = 'Installed version: v'+ vmaj +'.'+ vmin +', built '+ build_date +' '+ build_time;
+		if (fs_full) {
+			s += '<br>Cannot build, filesystem is FULL!';
+		} else
 		if (in_progress) {
 			s += '<br>Update to version v'+ + pmaj +'.'+ pmin +' in progress';
 		} else
@@ -1449,6 +1462,12 @@ function user_cb(obj)
          // new users display
          //for (var i=0; i < rx_chans; i++) if (s1 != '')
          w3_innerHTML('id-optbar-user-'+ i, (s1 != '')? (s1 +'<br>'+ s2) : '');
+		}
+		
+		if (obj.c) {
+		   //console.log('SAM carrier '+ obj.c);
+		   var el = w3_el('id-sam-carrier');
+		   if (el) w3_innerHTML(el, 'carrier '+ obj.c.toFixed(1) +' Hz');
 		}
 		
 		// inactivity timeout warning panel
@@ -1650,7 +1669,7 @@ function kiwi_msg(param, ws)
 		case "update_cb":
 			//console.log('update_cb='+ param[1]);
 			var o = JSON.parse(param[1]);
-			update_cb(o.p, o.i, o.r, o.g, o.v1, o.v2, o.p1, o.p2,
+			update_cb(o.f, o.p, o.i, o.r, o.g, o.v1, o.v2, o.p1, o.p2,
 				decodeURIComponent(o.d), decodeURIComponent(o.t));
 			break;					
 
@@ -1665,7 +1684,7 @@ function kiwi_msg(param, ws)
 				extint_srate = o.sr;
 				gps_stats_cb(o.ga, o.gt, o.gg, o.gf, o.gc, o.go);
 				if (o.gr) {
-				   kiwi.WSPR_rgrid = o.gr;
+				   kiwi.WSPR_rgrid = decodeURIComponent(o.gr);
 				   kiwi.GPS_fixes = o.gf;
 				   //console.log('stat kiwi.WSPR_rgrid='+ kiwi.WSPR_rgrid);
 				}
@@ -1705,13 +1724,13 @@ function kiwi_msg(param, ws)
       /*
       // enable DRM mode button
       var el = w3_el('id-button-drm');
-      if (el && kiwi.is_BBAI) {
+      if (el && kiwi.is_multi_core) {
          w3_remove(el, 'class-button-disbled');
          w3_attribute(el, 'onclick', 'mode_button(event, this)');
       }
       */
-		case "is_BBAI":
-		   kiwi.is_BBAI = 1;
+		case "is_multi_core":
+		   kiwi.is_multi_core = 1;
 		   break;
 		
 		case "authkey_cb":
@@ -1737,6 +1756,10 @@ function kiwi_msg(param, ws)
 		case "ip_limit":
 		   var p = decodeURIComponent(param[1]).split(',');
 			kiwi_24hr_ip_limit(parseInt(p[0]), p[1]);
+			break;
+
+		case "password_timeout":
+			kiwi_password_entry_timeout();
 			break;
 
 		case "comp_ctr":

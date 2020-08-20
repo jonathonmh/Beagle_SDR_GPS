@@ -31,6 +31,8 @@ Boston, MA  02110-1301, USA.
 #include "gps.h"
 #include "coroutines.h"
 #include "cuteSDR.h"
+#include "rx_noise.h"
+#include "teensy.h"
 #include "agc.h"
 #include "fir.h"
 #include "biquad.h"
@@ -46,9 +48,11 @@ Boston, MA  02110-1301, USA.
 #include "noiseproc.h"
 #include "lms.h"
 #include "dx.h"
+#include "noise_blank.h"
 #include "rx_sound.h"
 #include "rx_waterfall.h"
 #include "shmem.h"
+#include "wdsp.h"
 
 #ifdef DRM
  #include "DRM.h"
@@ -105,6 +109,7 @@ void c2s_sound_setup(void *param)
 {
 	conn_t *conn = (conn_t *) param;
 	double frate = ext_update_get_sample_rateHz(-1);
+	wdsp_SAM_demod_init();
 
     //cprintf(conn, "rx%d c2s_sound_setup\n", conn->rx_channel);
 	send_msg(conn, SM_SND_DEBUG, "MSG center_freq=%d bandwidth=%d adc_clk_nom=%.0f", (int) ui_srate/2, (int) ui_srate, ADC_CLOCK_NOM);
@@ -118,6 +123,7 @@ void c2s_sound(void *param)
 	conn->snd_cmd_recv_ok = false;
 	int rx_chan = conn->rx_channel;
 	snd_t *snd = &snd_inst[rx_chan];
+	wf_inst_t *wf = &WF_SHMEM->wf_inst[rx_chan];
 	rx_dpump_t *rx = &rx_dpump[rx_chan];
     iq_buf_t *iq = &RX_SHMEM->iq_buf[rx_chan];
 	
@@ -127,9 +133,6 @@ void c2s_sound(void *param)
 	
 	double freq=-1, _freq, gen=-1, _gen, locut=0, _locut, hicut=0, _hicut, mix;
 	int mode=-1, _mode, genattn=0, _genattn, mute, test=0, de_emp=0;
-	int noise_blanker=0, noise_threshold=0, nb_click=0, last_noise_pulse=0;
-	int lms_denoise=0, lms_autonotch=0, lms_de_delay=0, lms_an_delay=0;
-	float lms_de_beta=0, lms_an_beta=0, lms_de_decay=0, lms_an_decay=0;
 	double z1 = 0;
 
 	double frate = ext_update_get_sample_rateHz(rx_chan);      // FIXME: do this in loop to get incremental changes
@@ -176,6 +179,11 @@ void c2s_sound(void *param)
 	
 	memset(&rx->adpcm_snd, 0, sizeof(ima_adpcm_state_t));
 	
+	int noise_pulse_last = 0;
+	int nb_algo = NB_OFF, nr_algo = NR_OFF_;
+    int nb_enable[NOISE_TYPES] = {0}, nr_enable[NOISE_TYPES] = {0};
+	float nb_param[NOISE_TYPES][NOISE_PARAMS], nr_param[NOISE_TYPES][NOISE_PARAMS];
+
 	gps_timestamp_t *gps_tsp = &gps_ts[rx_chan];
 	memset(gps_tsp, 0, sizeof(gps_timestamp_t));
 
@@ -285,12 +293,17 @@ void c2s_sound(void *param)
 				if (mode != _mode) {
 
                     // when switching out of IQ or DRM modes: reset AGC, compression state
-		            bool IQ_or_DRM = (mode == MODE_IQ || mode == MODE_DRM);
-		            bool new_IQ_or_DRM = (_mode == MODE_IQ || _mode == MODE_DRM);
-				    if (IQ_or_DRM && !new_IQ_or_DRM && (cmd_recv & CMD_AGC)) {
+		            bool IQ_or_DRM_or_SAS = (mode == MODE_IQ || mode == MODE_DRM || mode == MODE_SAS);
+		            bool new_IQ_or_DRM_or_SAS = (_mode == MODE_IQ || _mode == MODE_DRM || _mode == MODE_SAS);
+				    if (IQ_or_DRM_or_SAS && !new_IQ_or_DRM_or_SAS && (cmd_recv & CMD_AGC)) {
 					    //cprintf(conn, "SND out IQ mode -> reset AGC, compression\n");
                         m_Agc[rx_chan].SetParameters(agc, hang, thresh, manGain, slope, decay, frate);
 	                    memset(&rx->adpcm_snd, 0, sizeof(ima_adpcm_state_t));
+                    }
+                    
+                    // reset SAM demod on non-SAM to SAM transition
+                    if ((_mode >= MODE_SAM && _mode <= MODE_SAS) && !(mode >= MODE_SAM && mode <= MODE_SAS)) {
+                        wdsp_SAM_reset(rx_chan);
                     }
 
 					mode = _mode;
@@ -312,6 +325,22 @@ void c2s_sound(void *param)
 					int fmax = frate/2 - 1;
 					if (hicut > fmax) hicut = fmax;
 					if (locut < -fmax) locut = -fmax;
+					
+					snd->locut = locut; snd->hicut = hicut;
+					
+					// normalized passband
+                    if (locut <= 0 && hicut >= 0) {     // straddles carrier
+                        snd->norm_locut = 0.0;
+                        snd->norm_hicut = MAX(-locut, hicut);
+                    } else {
+                        if (locut > 0) {
+                            snd->norm_locut = locut;
+                            snd->norm_hicut = hicut;
+                        } else {
+                            snd->norm_hicut = -locut;
+                            snd->norm_locut = -hicut;
+                        }
+                    }
 					
 					// bw for post AM det is max of hi/lo filter cuts
 					float bw = fmaxf(fabs(hicut), fabs(locut));
@@ -385,7 +414,7 @@ void c2s_sound(void *param)
 			}
 
 			if (strcmp(cmd, "SET little-endian") == 0) {
-				cprintf(conn, "SND little-endian\n");
+				//cprintf(conn, "SND little-endian\n");
 				little_endian = true;
 				continue;
 			}
@@ -405,7 +434,7 @@ void c2s_sound(void *param)
 					if (rx_chan == 0) g_genfreq = gen * kHz / ui_srate;
 				}
 				if (rx_chan == 0) g_mixfreq = mix;
-			
+				conn->ext_api = true;
 				continue;
 			}
 
@@ -417,7 +446,7 @@ void c2s_sound(void *param)
 					//printf("===> CmdSetGenAttn %d 0x%x\n", genattn, genattn);
 					if (rx_chan == 0) g_genampl = genattn / (float)((1<<17)-1);
 				}
-			
+				conn->ext_api = true;
 				continue;
 			}
 
@@ -445,61 +474,81 @@ void c2s_sound(void *param)
 				continue;
 			}
 
-			n = sscanf(cmd, "SET lms_denoise=%d", &lms_denoise);
+			n = sscanf(cmd, "SET nb algo=%d", &nb_algo);
 			if (n == 1) {
-				//printf("lms_denoise %d\n", lms_denoise);
-			    if (lms_denoise)
-	                m_LMS_denoise[rx_chan].Initialize(LMS_DENOISE_QRN, lms_de_delay, lms_de_beta, lms_de_decay);
+				//cprintf(conn, "nb: algo=%d\n", nb_algo);
+				memset(nb_enable, 0, sizeof(nb_enable));
+				memset(wf->nb_enable, 0, sizeof(wf->nb_enable));
 				continue;
 			}
 
-			n = sscanf(cmd, "SET lms.de_delay=%d", &lms_de_delay);
+			n = sscanf(cmd, "SET nr algo=%d", &nr_algo);
 			if (n == 1) {
-				//printf("lms_de_delay %d\n", lms_de_delay);
-	            m_LMS_denoise[rx_chan].Initialize(LMS_DENOISE_QRN, lms_de_delay, lms_de_beta, lms_de_decay);
+				//cprintf(conn, "nr: algo=%d\n", nr_algo);
+				memset(nr_enable, 0, sizeof(nr_enable));
 				continue;
 			}
 
-			n = sscanf(cmd, "SET lms.de_beta=%f", &lms_de_beta);
-			if (n == 1) {
-				//printf("lms_de_beta %.3f\n", lms_de_beta);
-	            m_LMS_denoise[rx_chan].Initialize(LMS_DENOISE_QRN, lms_de_delay, lms_de_beta, lms_de_decay);
+            int n_type, n_en;
+			n = sscanf(cmd, "SET nb type=%d en=%d", &n_type, &n_en);
+			if (n == 2) {
+				//cprintf(conn, "nb: type=%d en=%d\n", n_type, n_en);
+				nb_enable[n_type] = n_en;
+				wf->nb_enable[n_type] = n_en;
+				continue;
+			}
+			n = sscanf(cmd, "SET nr type=%d en=%d", &n_type, &n_en);
+			if (n == 2) {
+				//cprintf(conn, "nr: type=%d en=%d\n", n_type, n_en);
+				nr_enable[n_type] = n_en;
 				continue;
 			}
 
-			n = sscanf(cmd, "SET lms.de_decay=%f", &lms_de_decay);
-			if (n == 1) {
-				//printf("lms_de_decay %.3f\n", lms_de_decay);
-	            m_LMS_denoise[rx_chan].Initialize(LMS_DENOISE_QRN, lms_de_delay, lms_de_beta, lms_de_decay);
+            int n_param;
+            float n_pval;
+			n = sscanf(cmd, "SET nb type=%d param=%d pval=%f", &n_type, &n_param, &n_pval);
+			if (n == 3) {
+				//cprintf(conn, "nb: type=%d param=%d pval=%.9f\n", n_type, n_param, n_pval);
+				nb_param[n_type][n_param] = n_pval;
+
+				if (nb_algo == NB_STD || n_type == NB_CLICK) {
+                    wf->nb_param[n_type][n_param] = n_pval;
+                    wf->nb_param_change[n_type] = true;
+                }
+
+                if (n_type == NB_BLANKER) {
+                    switch (nb_algo) {
+                        case NB_STD: m_NoiseProc[rx_chan][NB_SND].SetupBlanker("SND", frate, nb_param[n_type]); break;
+                        case NB_WILD: nb_Wild_init(rx_chan, nb_param[n_type]); break;
+                    }
+                }
+                
 				continue;
 			}
 
-			n = sscanf(cmd, "SET lms_autonotch=%d", &lms_autonotch);
-			if (n == 1) {
-				//printf("lms_autonotch %d\n", lms_autonotch);
-			    if (lms_autonotch)
-	                m_LMS_autonotch[rx_chan].Initialize(LMS_AUTONOTCH_QRM, lms_an_delay, lms_an_beta, lms_an_decay);
+			n = sscanf(cmd, "SET nr type=%d param=%d pval=%f", &n_type, &n_param, &n_pval);
+			if (n == 3) {
+				//cprintf(conn, "nr: type=%d param=%d pval=%.9f\n", n_type, n_param, n_pval);
+				nr_param[n_type][n_param] = n_pval;
+
+                switch (nr_algo) {
+                    case NR_WDSP: wdsp_ANR_init(rx_chan, (nr_type_e) n_type, nr_param[n_type]); break;
+                    case NR_ORIG: m_LMS[rx_chan][n_type].Initialize((nr_type_e) n_type, nr_param[n_type]); break;
+                    case NR_SPECTRAL: nr_spectral_init(rx_chan, nr_param[n_type]); break;
+                }
+                
 				continue;
 			}
 
-			n = sscanf(cmd, "SET lms.an_delay=%d", &lms_an_delay);
-			if (n == 1) {
-				//printf("lms_an_delay %d\n", lms_an_delay);
-	            m_LMS_autonotch[rx_chan].Initialize(LMS_AUTONOTCH_QRM, lms_an_delay, lms_an_beta, lms_an_decay);
-				continue;
-			}
+            // old noise blanker API for kiwiclient et al
+            int nb, th;
+			n = sscanf(cmd, "SET nb=%d th=%d", &nb, &th);
+			if (n == 2) {
+				nb_param[NB_BLANKER][NB_GATE] = nb;
+				nb_param[NB_BLANKER][NB_THRESHOLD] = th;
+				nb_enable[NB_BLANKER] = nb? 1:0;
 
-			n = sscanf(cmd, "SET lms.an_beta=%f", &lms_an_beta);
-			if (n == 1) {
-				//printf("lms_an_beta %.3f\n", lms_an_beta);
-	            m_LMS_autonotch[rx_chan].Initialize(LMS_AUTONOTCH_QRM, lms_an_delay, lms_an_beta, lms_an_decay);
-				continue;
-			}
-
-			n = sscanf(cmd, "SET lms.an_decay=%f", &lms_an_decay);
-			if (n == 1) {
-				//printf("lms_an_decay %.3f\n", lms_an_decay);
-	            m_LMS_autonotch[rx_chan].Initialize(LMS_AUTONOTCH_QRM, lms_an_delay, lms_an_beta, lms_an_decay);
+				if (nb) m_NoiseProc[rx_chan][NB_SND].SetupBlanker("SND", frate, nb_param[NB_BLANKER]);
 				continue;
 			}
 
@@ -535,7 +584,7 @@ void c2s_sound(void *param)
                     b1 = z1;
                     b2 = 0;
 					m_de_emp_Biquad[rx_chan].InitFilterCoef(a0, a1, a2, b0, b1, b2);
-					cprintf(conn, "SND de-emp: %dus frate %.0f\n", (de_emp == 1)? 75:50, frate);
+					//cprintf(conn, "SND de-emp: %dus frate %.0f\n", (de_emp == 1)? 75:50, frate);
 				}
 				continue;
 			}
@@ -543,22 +592,6 @@ void c2s_sound(void *param)
 			n = sscanf(cmd, "SET test=%d", &test);
 			if (n == 1) {
 				//printf("test %d\n", test);
-				continue;
-			}
-
-            int nb, th;
-			n = sscanf(cmd, "SET nb=%d th=%d", &nb, &th);
-			if (n == 2) {
-			    if (nb < 0) {
-			        nb_click = (nb == -1)? 1:0;
-			        continue;
-			    }
-			    noise_blanker = nb;
-			    noise_threshold = th;
-
-				if (noise_blanker) {
-                    m_NoiseProc[rx_chan][NB_SND].SetupBlanker("SND", (float) noise_threshold, (float) noise_blanker, frate);
-				}
 				continue;
 			}
 
@@ -634,6 +667,8 @@ void c2s_sound(void *param)
 			//if (connection_hang) clprintf(conn, "SND CONNECTION HANG\n");
 			//if (conn->inactivity_timeout) clprintf(conn, "SND INACTIVITY T/O\n");
 			//if (conn->kick) clprintf(conn, "SND KICK\n");
+			
+			if (!conn->auth) send_msg(conn, SM_NO_DEBUG, "MSG password_timeout");
 		
 			// Ask waterfall task to stop (must not do while, for example, holding a lock).
 			// We've seen cases where the sound connects, then times out. But the w/f has never connected.
@@ -685,18 +720,17 @@ void c2s_sound(void *param)
 		#define SND_FLAG_LITTLE_ENDIAN  0x80
 		
 		bool isNBFM = (mode == MODE_NBFM);
-		bool IQ_or_DRM = (mode == MODE_IQ || mode == MODE_DRM);
+		bool IQ_or_DRM_or_SAS = (mode == MODE_IQ || mode == MODE_DRM || mode == MODE_SAS);
 
 		u1_t *bp_real_u1  = snd->out_pkt_real.u1;
 		s2_t *bp_real_s2  = snd->out_pkt_real.s2;
 		u1_t *bp_iq_u1    = snd->out_pkt_iq.u1;
 		s2_t *bp_iq_s2    = snd->out_pkt_iq.s2;
-		u1_t *flags    = (IQ_or_DRM? &snd->out_pkt_iq.h.flags : &snd->out_pkt_real.h.flags);
-		u1_t *seq      = (IQ_or_DRM? snd->out_pkt_iq.h.seq    : snd->out_pkt_real.h.seq);
-		char *smeter   = (IQ_or_DRM? snd->out_pkt_iq.h.smeter : snd->out_pkt_real.h.smeter);
+		u1_t *flags    = (IQ_or_DRM_or_SAS? &snd->out_pkt_iq.h.flags : &snd->out_pkt_real.h.flags);
+		u1_t *seq      = (IQ_or_DRM_or_SAS? snd->out_pkt_iq.h.seq    : snd->out_pkt_real.h.seq);
+		char *smeter   = (IQ_or_DRM_or_SAS? snd->out_pkt_iq.h.smeter : snd->out_pkt_real.h.smeter);
 
-		bool do_de_emp = (de_emp && !IQ_or_DRM);
-		bool do_lms    = (!isNBFM && !IQ_or_DRM);
+		bool do_de_emp = (de_emp && !IQ_or_DRM_or_SAS);
 		
 		#ifdef DRM
             drm_t *drm = &DRM_SHMEM->drm[rx_chan];
@@ -793,17 +827,24 @@ void c2s_sound(void *param)
 
 			if (masked) memset(i_samps, 0, sizeof(TYPECPX) * nrx_samps);
 			
-            if (nb_click) {
+            if (nb_enable[NB_CLICK] == NB_PRE_FILTER) {
                 u4_t now = timer_sec();
-                if (now != last_noise_pulse) {
-                    last_noise_pulse = now;
-                    i_samps[50].re = K_AMPMAX - 16;
+                if (now != noise_pulse_last) {
+                    noise_pulse_last = now;
+                    TYPEREAL pulse = nb_param[NB_CLICK][NB_PULSE_GAIN] * (K_AMPMAX - 16);
+                    for (int i=0; i < nb_param[NB_CLICK][NB_PULSE_SAMPLES]; i++) {
+                        i_samps[i].re = pulse;
+                        i_samps[i].im = 0;
+                    }
                 }
             }
 
-			if (noise_blanker) {
-                m_NoiseProc[rx_chan][NB_SND].ProcessBlanker(ns_in, i_samps, i_samps);
-            }
+            //#define NB_STD_POST_FILTER
+            #ifdef NB_STD_POST_FILTER
+            #else
+                if (nb_enable[NB_BLANKER] && nb_algo == NB_STD)
+		            m_NoiseProc[rx_chan][NB_SND].ProcessBlanker(ns_in, i_samps, i_samps);
+		    #endif
 
 			ns_out  = m_PassbandFIR[rx_chan].ProcessData(rx_chan, ns_in, i_samps, f_samps);
 			fir_pos = m_PassbandFIR[rx_chan].FirPos();
@@ -888,7 +929,7 @@ void c2s_sound(void *param)
             
             TYPEMONO16 *r_samps;
             
-            if (!IQ_or_DRM) {
+            if (!IQ_or_DRM_or_SAS) {
                 r_samps = &rx->real_samples[rx->real_wr_pos][0];
                 rx->real_seqnum[rx->real_wr_pos] = rx->real_seq;
                 rx->real_seq++;
@@ -905,10 +946,10 @@ void c2s_sound(void *param)
                 TYPEREAL *d_samps = rx->demod_samples;
     
                 for (j=0; j<ns_out; j++) {
-                    double pwr = a_samps->re*a_samps->re + a_samps->im*a_samps->im;
-                    double mag = sqrt(pwr);
-                    #define DC_ALPHA 0.99
-                    double z0 = mag + (z1 * DC_ALPHA);
+                    float pwr = a_samps->re*a_samps->re + a_samps->im*a_samps->im;
+                    float mag = sqrt(pwr);
+                    #define DC_ALPHA 0.99f
+                    float z0 = mag + (z1 * DC_ALPHA);
                     *d_samps = z0-z1;
                     z1 = z0;
                     d_samps++;
@@ -919,6 +960,18 @@ void c2s_sound(void *param)
                 // the non-FFT FIR has no pipeline delay issues
                 d_samps = rx->demod_samples;
                 m_AM_FIR[rx_chan].ProcessFilter(ns_out, d_samps, r_samps);
+                break;
+            }
+            
+            case MODE_SAM:
+            case MODE_SAL:
+            case MODE_SAU:
+            case MODE_SAS: {
+                TYPECPX *a_samps = rx->agc_samples;
+                m_Agc[rx_chan].ProcessData(ns_out, f_samps, a_samps, masked);
+
+                // NB: MODE_SAS stereo output samples put back into a_samps
+                wdsp_SAM_demod(rx_chan, mode, ns_out, a_samps, r_samps);
                 break;
             }
             
@@ -975,14 +1028,46 @@ void c2s_sound(void *param)
             if (do_de_emp) {    // AM and NBFM modes
                 m_de_emp_Biquad[rx_chan].ProcessFilter(ns_out, r_samps, r_samps);
             }
-    
-            if (do_lms) {       // AM and sideband modes
-    
-                // noise processors
-                if (lms_denoise) m_LMS_denoise[rx_chan].ProcessFilter(ns_out, r_samps, r_samps);
-                if (lms_autonotch) m_LMS_autonotch[rx_chan].ProcessFilter(ns_out, r_samps, r_samps);
-            }
             
+            if (nb_enable[NB_CLICK] == NB_POST_FILTER) {
+                u4_t now = timer_sec();
+                if (now != noise_pulse_last) {
+                    noise_pulse_last = now;
+                    TYPEMONO16 pulse = nb_param[NB_CLICK][NB_PULSE_GAIN] * (K_AMPMAX - 16);
+                    for (int i=0; i < nb_param[NB_CLICK][NB_PULSE_SAMPLES]; i++) {
+                        r_samps[i] = pulse;
+                    }
+                }
+            }
+
+            // noise & autonotch processors that only operate on real samples (i.e. non-IQ)
+            if (!IQ_or_DRM_or_SAS) {
+                if (nb_enable[NB_BLANKER]) {
+                    switch (nb_algo) {
+                        #ifdef NB_STD_POST_FILTER
+                            case NB_STD: m_NoiseProc[rx_chan][NB_SND].ProcessBlanker(ns_out, r_samps, r_samps); break;
+                        #endif
+                        case NB_WILD: nb_Wild_process(rx_chan, ns_out, r_samps, r_samps); break;
+                    }
+                }
+                
+                // ordered so denoiser can cleanup residual noise from autonotch
+                switch (nr_algo) {
+                    case NR_WDSP:
+                        if (nr_enable[NR_AUTONOTCH]) wdsp_ANR_filter(rx_chan, NR_AUTONOTCH, ns_out, r_samps, r_samps);
+                        if (nr_enable[NR_DENOISE]) wdsp_ANR_filter(rx_chan, NR_DENOISE, ns_out, r_samps, r_samps);
+                        break;
+
+                    case NR_ORIG:
+                        if (nr_enable[NR_AUTONOTCH]) m_LMS[rx_chan][NR_AUTONOTCH].ProcessFilter(ns_out, r_samps, r_samps);
+                        if (nr_enable[NR_DENOISE]) m_LMS[rx_chan][NR_DENOISE].ProcessFilter(ns_out, r_samps, r_samps);
+                        break;
+
+                    case NR_SPECTRAL:
+                        nr_spectral_process(rx_chan, ns_out, r_samps, r_samps);
+                        break;
+                }
+            }
             
             ////////////////////////////////
             // copy to output buffer and send to client
@@ -990,6 +1075,7 @@ void c2s_sound(void *param)
     
             if (mode == MODE_IQ
             #ifdef DRM
+                // DRM monitor mode is effectively the same as MODE_IQ
                 || (mode == MODE_DRM && (drm->monitor || rx_chan >= DRM_MAX_RX))
             #endif
             ){
@@ -1021,6 +1107,31 @@ void c2s_sound(void *param)
                         *bp_iq_u1++ = (im >> 8) & 0xff; bc++;
                         *bp_iq_u1++ = (im >> 0) & 0xff; bc++;
                         f_samps++;
+                    }
+                }
+            } else
+            
+            if (mode == MODE_SAS) {
+                TYPECPX *a_samps = rx->agc_samples;
+
+                if (little_endian) {
+                    bc = ns_out * NIQ * sizeof(s2_t);
+                    for (j=0; j < ns_out; j++) {
+                        // can cast TYPEREAL directly to s2_t due to choice of CUTESDR_SCALE
+                        s2_t re = (s2_t) a_samps->re, im = (s2_t) a_samps->im;
+                        *bp_iq_s2++ = re;      // arm native little-endian (put any swap burden on client)
+                        *bp_iq_s2++ = im;
+                        a_samps++;
+                    }
+                } else {
+                    for (j=0; j < ns_out; j++) {
+                        // can cast TYPEREAL directly to s2_t due to choice of CUTESDR_SCALE
+                        s2_t re = (s2_t) a_samps->re, im = (s2_t) a_samps->im;
+                        *bp_iq_u1++ = (re >> 8) & 0xff; bc++;  // choose a network byte-order (big-endian)
+                        *bp_iq_u1++ = (re >> 0) & 0xff; bc++;
+                        *bp_iq_u1++ = (im >> 8) & 0xff; bc++;
+                        *bp_iq_u1++ = (im >> 0) & 0xff; bc++;
+                        a_samps++;
                     }
                 }
             } else
@@ -1147,8 +1258,8 @@ void c2s_sound(void *param)
 
         *flags = 0;
         if (dpump.rx_adc_ovfl) *flags |= SND_FLAG_ADC_OVFL;
-        if (IQ_or_DRM) *flags |= SND_FLAG_MODE_IQ;
-        if (compression && !IQ_or_DRM) *flags |= SND_FLAG_COMPRESSED;
+        if (IQ_or_DRM_or_SAS) *flags |= SND_FLAG_MODE_IQ;
+        if (compression && !IQ_or_DRM_or_SAS) *flags |= SND_FLAG_COMPRESSED;
         if (masked) *flags |= SND_FLAG_MASKED;
         if (little_endian) *flags |= SND_FLAG_LITTLE_ENDIAN;
 
@@ -1170,13 +1281,13 @@ void c2s_sound(void *param)
         // send sequence number that waterfall syncs to on client-side
         snd->seq++;
         SET_LE_U32(seq, snd->seq);
-        WF_SHMEM->wf_inst[rx_chan].snd_seq = snd->seq;
+        wf->snd_seq = snd->seq;
         //{ real_printf("%d ", snd->seq & 1); fflush(stdout); }
         //{ real_printf("q%d ", snd->seq); fflush(stdout); }
 
         //printf("hdr %d S%d\n", sizeof(out_pkt.h), bc); fflush(stdout);
         int aud_bytes;
-        if (IQ_or_DRM) {
+        if (IQ_or_DRM_or_SAS) {
             // allow GPS timestamps to be seen by internal extensions
             // but selectively remove from external connections (see admin page security tab)
             if (!allow_gps_tstamp) {
@@ -1225,8 +1336,8 @@ void c2s_sound(void *param)
 		#if 0
 			static u4_t last_time[MAX_RX_CHANS];
 			u4_t now = timer_ms();
-			printf("SND%d: %d %.3fs seq-%d\n", rx_chan, bytes,
-				(float) (now - last_time[rx_chan]) / 1e3, *seq);
+			printf("SND%d: %d %.3fs seq-%d\n", rx_chan, aud_bytes,
+				(float) (now - last_time[rx_chan]) / 1e3, snd->seq);
 			last_time[rx_chan] = now;
 		#endif
 

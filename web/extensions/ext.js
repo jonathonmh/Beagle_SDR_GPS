@@ -13,6 +13,10 @@ var extint = {
    default_h: 300,
    prev_mode: null,
    seq: 0,
+   
+   // extensions not subject to DRM lockout
+   // FIXME: allow C-side API to specify
+   no_lockout: [ 'noise_blank', 'noise_filter', 'ant_switch', 'iframe', 'colormap', 'devl' ]
 };
 
 var devl = {
@@ -139,13 +143,8 @@ function ext_tune(freq_dial_kHz, mode, zoom, zoom_level, low_cut, high_cut) {
 	//console.log('ext_tune: '+ freq_dial_kHz +', '+ mode +', '+ zoom +', '+ zoom_level);
 	
 	extint_ext_is_tuning = true;
-	   var saved_pb = (!pb_specified)? ext_get_passband() : null;
       freqmode_set_dsp_kHz(freq_dial_kHz, mode);
-      
-      if (pb_specified)
-         ext_set_passband(low_cut, high_cut);
-      else
-         ext_set_passband(saved_pb.low, saved_pb.high);
+      if (pb_specified) ext_set_passband(low_cut, high_cut);
       
       if (zoom != undefined) {
          zoom_step(zoom, zoom_level);
@@ -185,6 +184,11 @@ function ext_get_mode()
 	return cur_mode;
 }
 
+function ext_is_IQ_or_stereo_mode()
+{
+   return (cur_mode == 'drm' || cur_mode == 'iq' || cur_mode == 'sas');
+}
+
 function ext_get_prev_mode()
 {
 	return extint.prev_mode;
@@ -195,6 +199,7 @@ function ext_set_mode(mode, freq, opt)
    var new_drm = (mode == 'drm');
    if (new_drm)
       extint.prev_mode = cur_mode;
+
    //console.log('### ext_set_mode '+ mode +' prev='+ extint.prev_mode);
 	demodulator_analog_replace(mode, freq);
 	
@@ -253,7 +258,7 @@ function ext_set_passband(low_cut, high_cut, set_mode_pb, freq_dial_Hz)		// spec
 	//console.log('SET_PB okay='+ okay);
 	
 	// set the passband for the current mode as well (sticky)
-	if (set_mode_pb != undefined && set_mode_pb && okay) {
+	if (isArg(set_mode_pb) && set_mode_pb && okay) {
 		passbands[cur_mode].last_lo = low_cut;
 		passbands[cur_mode].last_hi = high_cut;
 	}
@@ -434,6 +439,20 @@ function ext_panel_set_name(name)
 	extint.current_ext_name = name;
 }
 
+
+/*
+screen.{width,height}	P=portrait L=landscape
+			   w     h		screen.[wh] in portrait
+			   h     w		rotated to landscape
+iPhone 5S	320   568	P
+iPhone X	   414   896	P
+levono		600   976	P 7"
+huawei		600   976	P 7"
+
+iPad 2		768   1024	P
+MBP 15"		1440  900	L
+*/
+
 function ext_mobile_info(last)
 {
    var w = window.innerWidth;
@@ -459,8 +478,8 @@ function ext_mobile_info(last)
 function extint_news(s)
 {
    var el = w3_el('id-news');
-   el.style.width = '200px';
-   el.style.height = '60px';
+   el.style.width = '400px';
+   el.style.height = '300px';
    el.style.visibility = 'visible';
    el.style.zIndex = 9999;
    w3_innerHTML('id-news-inner', s);
@@ -558,6 +577,12 @@ function extint_panel_show(controls_html, data_html, show_func)
 	extint.displayed = true;
 }
 
+function ext_panel_displayed(ext_name) {
+   return (extint.displayed && (ext_name? (ext_name == extint.current_ext_name) : true));
+}
+
+function ext_panel_redisplay(s) { w3_innerHTML('id-ext-controls-container', s); }
+
 function extint_panel_hide()
 {
 	//console.log('extint_panel_hide using_data_container='+ extint.using_data_container);
@@ -576,7 +601,7 @@ function extint_panel_hide()
 	w3_visible('id-ext-controls', false);
 	//w3_visible('id-msgs', true);
 	
-	extint_blur_prev();
+	extint_blur_prev(1);
 	
 	// on close, reset extension menu
 	w3_select_value('select-ext', -1);
@@ -673,12 +698,12 @@ function extint_msg_cb(param, ws)
 	return true;
 }
 
-function extint_blur_prev()
+function extint_blur_prev(restore)
 {
 	if (extint.current_ext_name != null) {
 		w3_call(extint.current_ext_name +'_blur');
 		recv_websocket(extint.ws, null);		// ignore further server ext messages
-		ext_set_controls_width_height();		// restore width
+		if (restore) ext_set_controls_width_height();		// restore width/height
 		extint.current_ext_name = null;
 		time_display_setup('id-topbar-right-container');
 	}
@@ -693,7 +718,7 @@ function extint_focus(is_locked)
    var ext = extint.current_ext_name;
 	console.log('extint_focus: loading '+ ext +'.js');
 	
-	if (is_locked) {
+	if (is_locked && !extint.no_lockout.includes(ext)) {
 	   var s =
          w3_text('w3-medium w3-text-css-yellow',
             'Cannot use extensions while <br> another channel is in DRM mode.'
@@ -703,18 +728,18 @@ function extint_focus(is_locked)
       return;
 	}
 
-	kiwi_load_js_dir('extensions/'+ ext +'/'+ ext, ['.js', '.css'],
+   kiwi_load_js_dir('extensions/'+ ext +'/'+ ext, ['.js', '.css'],
 
-	   // post-load
-	   function() {
+      // post-load
+      function() {
          console.log('extint_focus: calling '+ ext +'_main()');
          //setTimeout('ext_set_controls_width_height(); w3_call('+ ext +'_main);', 3000);
          ext_set_controls_width_height();
          w3_call(ext +'_main');
-	   },
+      },
 
-	   // pre-load
-	   function(loaded) {
+      // pre-load
+      function(loaded) {
          console.log('extint_focus: '+ ext +' loaded='+ loaded);
          if (loaded) {
             var s = 'loading extension...';
@@ -723,8 +748,8 @@ function extint_focus(is_locked)
             if (kiwi.is_locked)
                console.log('==== IS_LOCKED =================================================');
          }
-	   }
-	);
+      }
+   );
 }
 
 var extint_first_ext_load = true;
@@ -732,7 +757,7 @@ var extint_first_ext_load = true;
 // called on extension menu item selection
 function extint_select(idx)
 {
-	extint_blur_prev();
+	extint_blur_prev(0);
 	
 	idx = +idx;
 	w3_el('select-ext').value = idx;

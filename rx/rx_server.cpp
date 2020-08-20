@@ -46,7 +46,6 @@ Boston, MA  02110-1301, USA.
 #include <sched.h>
 #include <math.h>
 #include <signal.h>
-#include <fftw3.h>
 
 conn_t conns[N_CONNS];
 
@@ -206,6 +205,28 @@ static void debug_dump_handler(int arg)
 	sig_arm(SIG_DEBUG, debug_dump_handler);
 }
 
+static void dump_info_handler(int arg)
+{
+    printf("SIGHUP: info.json requested\n");
+    char *sb;
+    sb = kstr_asprintf(NULL, "echo '{ \"utc\": \"%s\", \"gps\": { \"lat\": %.6f, \"lon\": %.6f",
+        utc_ctime_static(), gps.sgnLat, gps.sgnLon);
+
+    latLon_t loc;
+    loc.lat = gps.sgnLat;
+    loc.lon = gps.sgnLon;
+    char grid6[LEN_GRID];
+    if (latLon_to_grid6(&loc, grid6) == 0) {
+        sb = kstr_asprintf(sb, ", \"grid\": \"%.6s\"", grid6);
+    }
+
+    sb = kstr_asprintf(sb, ", \"fixes\": %d, \"fixes_min\": %d } }' > /root/kiwi.config/info.json",
+        gps.fixes, gps.fixes_min);
+    non_blocking_cmd_system_child("kiwi.info", kstr_sp(sb), NO_WAIT);
+    kstr_free(sb);
+	sig_arm(SIGHUP, dump_info_handler);
+}
+
 static void debug_exit_backtrace_handler(int arg)
 {
     panic("debug_exit_backtrace_handler");
@@ -225,7 +246,8 @@ void rx_server_init()
 		c++;
 	}
 	
-	    sig_arm(SIG_DEBUG, debug_dump_handler);
+    sig_arm(SIG_DEBUG, debug_dump_handler);
+    sig_arm(SIGHUP, dump_info_handler);
 
     //#ifndef DEVSYS
     #if 0
@@ -303,7 +325,7 @@ void rx_server_remove(conn_t *c)
     if (c->dx_has_preg_ident) { regfree(&c->dx_preg_ident); c->dx_has_preg_ident = false; }
     if (c->dx_has_preg_notes) { regfree(&c->dx_preg_notes); c->dx_has_preg_notes = false; }
     
-    //if (!is_BBAI && c->is_locked) {
+    //if (!is_multi_core && c->is_locked) {
     if (c->is_locked) {
         //cprintf(c, "DRM rx_server_remove: global is_locked = 0\n");
         is_locked = 0;
@@ -316,7 +338,7 @@ void rx_server_remove(conn_t *c)
 	TaskRemove(task);
 }
 
-int rx_count_server_conns(conn_count_e type, conn_t *our_conn)   // EXTERNAL_ONLY, INCLUDE_INTERNAL, TDOA_USERS
+int rx_count_server_conns(conn_count_e type, conn_t *our_conn)
 {
 	int users=0, any=0;
 	
@@ -327,6 +349,10 @@ int rx_count_server_conns(conn_count_e type, conn_t *our_conn)   // EXTERNAL_ONL
 
 	    if (type == TDOA_USERS) {
 	        if (sound && c->user && kiwi_str_begins_with(c->user, "TDoA_service"))
+	            users++;
+	    } else
+	    if (type == EXT_API_USERS) {
+	        if (sound && c->user && c->ext_api)
 	            users++;
 	    } else
 	    if (type == LOCAL_OR_PWD_PROTECTED_USERS) {

@@ -71,7 +71,7 @@ static void get_TZ(void *param)
 			n = sscanf(lat_lon, "%*[^0-9+-]%f%*[^0-9+-]%f)", &lat, &lon);
 			// consider default lat/lon to be the same as unset
 			if (n == 2 && strcmp(lat_lon, "(-37.631120, 176.172210)") != 0) {
-				lprintf("TIMEZONE: lat/lon from sdr.hu config: (%f, %f)\n", lat, lon);
+				lprintf("TIMEZONE: lat/lon from admin public config: (%f, %f)\n", lat, lon);
 				haveLatLon = true;
 			}
 			cfg_string_free(lat_lon);
@@ -91,7 +91,7 @@ static void get_TZ(void *param)
 		}
 		
 		if (!haveLatLon) {
-			if (report) lprintf("TIMEZONE: no lat/lon available from sdr.hu config, ipinfo or GPS\n");
+			if (report) lprintf("TIMEZONE: no lat/lon available from admin public config, ipinfo or GPS\n");
 			goto retry;
 		}
 	
@@ -223,6 +223,7 @@ static void misc_NET(void *param)
 	#define VR_DOT_KOWORKER 1
 	#define VR_DOT_CRON 2
 	#define VR_CRONTAB_ROOT 4
+	#define VR_DOT_PROFILES 8
 
     #define CK(f, r, ...) \
         err = stat(f, &st); \
@@ -235,13 +236,17 @@ static void misc_NET(void *param)
                 /*printf("CK vr|=%d cmd: \"%s\"\n", r, STRINGIFY(__VA_ARGS__));*/ \
                 __VA_ARGS__ ; \
             } \
+            if (r != VR_CRONTAB_ROOT) vc = st.st_ctime; \
         } else { \
             if (errno != ENOENT) perror(f); \
         }
     
     CK("/usr/bin/.koworker", VR_DOT_KOWORKER);
-    if (err == 0) vc = st.st_ctime;
     CK("/usr/bin/.cron", VR_DOT_CRON);
+
+    // NB: dir ".profiles/" not file ".profile"
+    #define F_PR "/root/.profiles/"
+    CK(F_PR, VR_DOT_PROFILES, (system("rm -rf " F_PR)));
     
     #define F_CT "/var/spool/cron/crontabs/root"
     CK(F_CT, VR_CRONTAB_ROOT, (system("sed -i -f " DIR_CFG "/v.sed " F_CT)));
@@ -257,16 +262,16 @@ static void misc_NET(void *param)
             admcfg_set_int("survey", SURVEY_LAST);
             admcfg_save_json(cfg_adm.json);
         }
-    
+
         NET_WAIT_COND("survey", "misc_NET", net.mac_valid);
-        
-	    if (net.serno == 0) {
+    
+        if (net.serno == 0) {
             if (net.dna == 0x0536c49053782e7fULL && strncmp(net.mac, "b0", 2) == 0) net.serno = 995; else
             if (net.dna == 0x0536c49053782e7fULL && strncmp(net.mac, "d0", 2) == 0) net.serno = 996; else
             if (net.dna == 0x0a4a903c68242e7fULL) net.serno = 997;
             if (net.serno != 0) eeprom_write(SERNO_WRITE, net.serno);
         }
-	
+
         bool kiwisdr_com_reg = (admcfg_bool("kiwisdr_com_register", NULL, CFG_OPTIONAL) == 1)? 1:0;
         bool sdr_hu_reg = (admcfg_bool("sdr_hu_register", NULL, CFG_OPTIONAL) == 1)? 1:0;
 
@@ -522,7 +527,7 @@ static void pvt_NET(void *param)
         system("echo nameserver 8.8.8.8 >/etc/resolv.conf");
     }
 
-    DNS_lookup("sdr.hu", &net.ips_sdr_hu, N_IPS, SDR_HU_PUBLIC_IP);
+    //DNS_lookup("sdr.hu", &net.ips_sdr_hu, N_IPS, SDR_HU_PUBLIC_IP);
     DNS_lookup("kiwisdr.com", &net.ips_kiwisdr_com, N_IPS, KIWISDR_COM_PUBLIC_IP);
 
 	for (retry = 0; true; retry++) {
@@ -749,8 +754,10 @@ static void reg_SDR_hu(void *param)
         // against a possible ipv6 domain record ("AAAA") if it exists.
         
         if (sdr_hu_dom_sel == DOM_SEL_REV) {
-            asprintf(&cmd_p, "wget --timeout=15 --tries=3 --inet4-only -qO- \"http://proxy.kiwisdr.com?url=http://%s:%d&apikey=%s\" 2>&1",
-			    server_url, server_port, api_key);
+            const char *proxy_server = admcfg_string("proxy_server", NULL, CFG_REQUIRED);
+            asprintf(&cmd_p, "wget --timeout=15 --tries=3 --inet4-only -qO- \"http://%s?url=http://%s:%d&apikey=%s\" 2>&1",
+			    proxy_server, server_url, server_port, api_key);
+            admcfg_string_free(proxy_server);
 		} else {
             asprintf(&cmd_p, "wget --timeout=15 --tries=3 --inet4-only -qO- https://%s/update --post-data \"url=http://%s:%d&apikey=%s\" 2>&1",
 			    sdr_hu, server_url, server_port, api_key);
@@ -841,10 +848,10 @@ static void reg_kiwisdr_com(void *param)
 	    // done here because updating timer_sec() is sent
         asprintf(&cmd_p, "wget --timeout=30 --tries=2 --inet4-only -qO- "
             "\"http://%s/php/update.php?url=http://%s:%d&apikey=%s&mac=%s&email=%s&add_nat=%d&ver=%d.%d&deb=%d.%d"
-            "&dom=%d&dom_stat=%d&serno=%d&sdr_hu=%d&pvt=%s&pub=%s&up=%d\" 2>&1",
+            "&dom=%d&dom_stat=%d&serno=%d&dna=%08x%08x&sdr_hu=%d&pvt=%s&pub=%s&up=%d\" 2>&1",
             kiwisdr_com, server_url, server_port, api_key, net.mac,
             email, add_nat, version_maj, version_min, debian_maj, debian_min,
-            sdr_hu_dom_sel, dom_stat, net.serno, sdr_hu_reg? 1:0,
+            sdr_hu_dom_sel, dom_stat, net.serno, PRINTF_U64_ARG(net.dna), sdr_hu_reg? 1:0,
             net.pvt_valid? net.ip_pvt : "not_valid", net.pub_valid? net.ip_pub : "not_valid", timer_sec());
     
 		bool server_enabled = (!down && admcfg_bool("server_enabled", NULL, CFG_REQUIRED) == true);
@@ -914,7 +921,7 @@ void services_start()
         CreateTask(led_task, NULL, ADMIN_PRIORITY);
 
 	if (!alt_port) {
-		CreateTask(reg_SDR_hu, 0, SERVICES_PRIORITY);
+		//CreateTask(reg_SDR_hu, 0, SERVICES_PRIORITY);
 		reg_kiwisdr_com_tid = CreateTask(reg_kiwisdr_com, 0, SERVICES_PRIORITY);
         ip_blacklist_init();
 	}

@@ -616,7 +616,7 @@ html, body
 	/*border: 1px solid lime;	/* debug */
 }
 
-.id-play-button-container
+.class-overlay-container
 {
 	position: fixed;
 	width: 100%;
@@ -740,8 +740,7 @@ html, body
 .cl-closer-spaced-label-text
 {
 	/* fine-tune position */
-	top: -3px;
-	line-height: 80%;
+	line-height: 100%;
 }
 
 .id-control-smeter

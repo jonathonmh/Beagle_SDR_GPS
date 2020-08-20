@@ -5,7 +5,7 @@
 //		NTP status?
 
 var admin = {
-   BBAI: false,
+   rx14_wf0: false,
    reg_status: {}
 };
 
@@ -88,7 +88,7 @@ function mode_html()
                w3_div('w3-flex w3-halign-center w3-margin-B-5', '<img src="gfx/kiwi.73x73.jpg" width="73" height="73" />'),
                w3_div('w3-flex w3-halign-center w3-margin-B-5', '<img src="gfx/cowbelly.73x73.jpg" width="73" height="73" />'),
                w3_div('w3-flex', '<img src="gfx/kiwi.derp.113x73.jpg" width="113" height="73" />'),
-               admin.BBAI? 
+               admin.rx14_wf0? 
                   w3_div('w3-flex', '<img src="gfx/kiwi.derp.113x73.jpg" width="113" height="73" />')
                :
                   ''
@@ -97,8 +97,8 @@ function mode_html()
                w3_nav(admin_colors[ci++] +' w3-border w3-padding-xxlarge w3-restart', 'Kiwi classic', kiwi.RX4_WF4, 'firmware_sel_cb', (adm.firmware_sel == kiwi.RX4_WF4)),
                w3_nav(admin_colors[ci++] +' w3-border w3-padding-xxlarge w3-restart', 'More receivers', kiwi.RX8_WF2, 'firmware_sel_cb', (adm.firmware_sel == kiwi.RX8_WF2)),
                w3_nav(admin_colors[ci++] +' w3-border w3-padding-xxlarge w3-restart', 'More bandwidth', kiwi.RX3_WF3, 'firmware_sel_cb', (adm.firmware_sel == kiwi.RX3_WF3)),
-               admin.BBAI? 
-                  w3_nav(admin_colors[ci++] +' w3-border w3-padding-xxlarge w3-restart', 'BBAI rx14_wf0', kiwi.RX14_WF0, 'firmware_sel_cb', (adm.firmware_sel == kiwi.RX14_WF0))
+               admin.rx14_wf0? 
+                  w3_nav(admin_colors[ci++] +' w3-border w3-padding-xxlarge w3-restart', 'MCORE rx14_wf0', kiwi.RX14_WF0, 'firmware_sel_cb', (adm.firmware_sel == kiwi.RX14_WF0))
                :
                   ''
             ),
@@ -230,17 +230,37 @@ function control_html()
 			)
       );
 
+   // Let cfg.ext_api_nchans retain values > rx_chans if it was set when another configuration
+   // was used. Just clamp the menu value to the current rx_chans;
+	var ext_api_ch = ext_get_cfg_param('ext_api_nchans', -1);
+	if (ext_api_ch == -1) ext_api_ch = rx_chans;      // has never been set
+	var ext_api_nchans = Math.min(ext_api_ch, rx_chans);
+   var ext_api_chans_u = { 0:'none' };
+   for (var i = 1; i <= rx_chans; i++)
+      ext_api_chans_u[i] = i.toFixed(0);
+
 	var s2 =
 		'<hr>' +
-		w3_third('', 'w3-container w3-valign',
+		w3_inline_percent('w3-container w3-valign',
 			w3_divs('w3-center w3-tspace-8',
-				w3_div('', '<b>Enable user connections?</b>'),
+				w3_div('', '<b>Enable user<br>connections?</b>'),
             w3_switch('', 'Yes', 'No', 'adm.server_enabled', adm.server_enabled, 'server_enabled_cb')
-			),
+			), 15,
+			
 			w3_divs('w3-center w3-tspace-8',
-				w3_div('', '<b>Close all active user connections</b>'),
+				w3_div('', '<b>Close all active<br>user connections</b>'),
 				w3_button('w3-red', 'Kick', 'control_user_kick_cb')
-			),
+			), 15,
+
+         w3_div('w3-center',
+            w3_select('', 'Number of simultaneous channels available<br>for connection by non-Kiwi apps',
+               '', 'ext_api_nchans', ext_api_nchans, ext_api_chans_u, 'admin_select_cb'),
+            w3_div('w3-margin-T-8 w3-text-black',
+               'If you want to limit incoming connections from <br> non-Kiwi apps like kiwirecorder set this value. <br>' +
+               'This overrides similar value in TDoA extension settings.'
+            )
+         ), 35,
+
 			w3_divs('w3-restart/w3-center w3-tspace-8',
 				w3_div('', '<b>Disable waterfalls/spectrum?</b>'),
             w3_switch('', 'Yes', 'No', 'cfg.no_wf', cfg.no_wf, 'admin_radio_YN_cb'),
@@ -248,7 +268,7 @@ function control_html()
 				   'Set "yes" to save Internet bandwidth by preventing <br>' +
 				   'the waterfall and spectrum from being displayed.'
 				)
-			)
+			), 35
 		) +
 		w3_div('w3-container w3-margin-top',
 			w3_input_get('', 'Reason if disabled', 'reason_disabled', 'reason_disabled_cb', '', 'will be shown to users attempting to connect')
@@ -396,7 +416,7 @@ function connect_html()
 		
       w3_divs('w3-container/w3-tspace-8',
          w3_label('w3-bold', 'What domain name or IP address will people use to connect to your KiwiSDR?<br>' +
-            'If you are listing on sdr.hu this information will be part of your entry.<br>' +
+            'If you are listing on rx.kiwisdr.com this information will be part of your entry.<br>' +
             'Click one of the five options below and enter any additional information:<br><br>'),
          
          // (n/a anymore) w3-static because w3-sidenav does a position:fixed which is no good here at the bottom of the page
@@ -490,8 +510,8 @@ function connect_html()
 		);
 
    var s4 =
-		'<hr>' +
-		w3_divs('/w3-tspace-8',
+      '<hr>' +
+      w3_divs('/w3-tspace-8',
          w3_div('w3-container w3-valign',
             '<header class="w3-container w3-yellow"><h6>' +
             'Please read these instructions before use: ' +
@@ -501,7 +521,7 @@ function connect_html()
 
 			w3_col_percent('w3-text-teal/w3-container',
 			   w3_div('w3-text-teal w3-bold', 'Reverse proxy configuration'), 50,
-				w3_div('w3-text-teal w3-bold w3-center w3-light-grey', 'Proxy information for kiwisdr.com'), 50
+				w3_div('id-proxy-hdr w3-text-teal w3-bold w3-center w3-light-grey', 'Proxy information for proxy.kiwisdr.com'), 50
 			),
 			
 			w3_col_percent('w3-text-teal/w3-container',
@@ -519,13 +539,13 @@ function connect_html()
 					)
 				), 50,
 				
-				w3_div('',
+			w3_div('',
                w3_div('w3-show-inline-block|width:60%;',
                   w3_input_get('', 'Host name (your choice, see instructions)',
                      'adm.rev_host', 'connect_rev_host_cb', '', 'required'
                   )
                ) +
-               w3_div('id-connect-rev-url w3-show-inline-block', '.proxy.kiwisdr.com')
+               w3_div('id-connect-proxy_server w3-show-inline-block')
             ), 50
 			),
 			
@@ -541,9 +561,10 @@ function connect_html()
 
 function connect_focus()
 {
-   connect.focus = 1;
-   connect_update_url();
-	ext_send('SET DUC_status_query');
+    connect.focus = 1;
+    connect_update_url();
+	w3_el('id-proxy-hdr').innerHTML = 'Proxy information for '+ adm.proxy_server;
+    ext_send('SET DUC_status_query');
 	
 	if (cfg.sdr_hu_dom_sel == connect_dom_sel.REV)
 	   ext_send('SET rev_status_query');
@@ -554,8 +575,6 @@ function connect_blur()
    connect.focus = 0;
 }
 
-var connect_rev_server = -1;
-
 function connect_update_url()
 {
    var ok, ok_color;
@@ -565,13 +584,12 @@ function connect_update_url()
 	w3_el('id-connect-duc-dom').innerHTML = 'Use domain name from DUC configuration below: ' +
 	   w3_div('w3-show-inline-block w3-text-black '+ ok_color, ok? adm.duc_host : '(none currently set)');
 
-   var server = (connect_rev_server == -1)? '' : connect_rev_server;
-   var rev_server_url = '.proxy'+ server +'.kiwisdr.com';
    ok = (adm.rev_host && adm.rev_host != '');
    ok_color = ok? 'w3-background-pale-aqua' : 'w3-override-yellow';
+   var rev_host_fqdn = ok? (adm.rev_host +'.'+ adm.proxy_server) : '(none currently set)';
 	w3_el('id-connect-rev-dom').innerHTML = 'Use domain name from reverse proxy configuration below: ' +
-	   w3_div('w3-show-inline-block w3-text-black '+ ok_color, ok? (adm.rev_host + rev_server_url) : '(none currently set)');
-	w3_el('id-connect-rev-url').innerHTML = rev_server_url;
+	   w3_div('w3-show-inline-block w3-text-black '+ ok_color, rev_host_fqdn);
+	w3_el('id-connect-proxy_server').innerHTML = '.'+ adm.proxy_server;
 
    ok = config_net.pub_ip;
    ok_color = ok? 'w3-background-pale-aqua' : 'w3-override-yellow';
@@ -604,7 +622,7 @@ function connect_dom_nam_focus()
 	ext_set_cfg_param('cfg.server_url', cfg.sdr_hu_dom_name, true);
 	ext_set_cfg_param('cfg.sdr_hu_dom_sel', connect_dom_sel.NAM, true);
 	connect_update_url();
-   w3_hide('id-warn-ip');
+   //w3_hide('id-warn-ip');
 }
 
 function connect_dom_duc_focus()
@@ -613,18 +631,17 @@ function connect_dom_duc_focus()
 	ext_set_cfg_param('cfg.server_url', adm.duc_host, true);
 	ext_set_cfg_param('cfg.sdr_hu_dom_sel', connect_dom_sel.DUC, true);
 	connect_update_url();
-   w3_hide('id-warn-ip');
+   //w3_hide('id-warn-ip');
 }
 
 function connect_dom_rev_focus()
 {
-   var server = (connect_rev_server == -1)? '' : connect_rev_server;
-   var dom = (adm.rev_host == '')? '' : (adm.rev_host + '.proxy'+ server +'.kiwisdr.com');
+   var dom = (adm.rev_host == '')? '' : (adm.rev_host +'.'+ adm.proxy_server);
    console.log('connect_dom_rev_focus server_url='+ dom);
 	ext_set_cfg_param('cfg.server_url', dom, true);
 	ext_set_cfg_param('cfg.sdr_hu_dom_sel', connect_dom_sel.REV, true);
 	connect_update_url();
-   w3_hide('id-warn-ip');
+   //w3_hide('id-warn-ip');
 }
 
 function connect_dom_pub_focus()
@@ -788,9 +805,6 @@ function connect_rev_status_cb(status)
 	var s;
 	
 	if (status >= 0 && status <= 99 && cfg.sdr_hu_dom_sel == connect_dom_sel.REV) {
-	   // jks-proxy
-      //connect_rev_server = status & 0xf;
-      //status = status >> 4;
       connect_dom_rev_focus();
    }
 	
@@ -804,7 +818,8 @@ function connect_rev_status_cb(status)
 		case 103: s = 'Invalid characters in user key or host name field (use a-z, 0-9, -, _)'; break;
 		case 200: s = 'Reverse proxy enabled and running'; break;
 		case 201: s = 'Reverse proxy enabled and pending'; break;
-		case 900: s = 'Problem contacting proxy.kiwisdr.com; please check Internet connection'; break;
+		case 900: s = 'Problem contacting proxy server; please check Internet connection'; break;
+		case 901: s = 'Proxy server returned invalid status data?'; break;
 		default:  s = 'Reverse proxy internal error: '+ status; break;
 	}
 	
@@ -947,7 +962,7 @@ function backup_focus()
 	w3_el('id-output-msg').style.height = px(300);
 }
 
-var sd_progress, sd_progress_max = 4*60;		// measured estimate -- in secs (varies with SD card write speed)
+var sd_progress, sd_progress_max = 6*60;		// measured estimate -- in secs (varies with SD card write speed)
 var backup_sd_interval;
 var backup_refresh_icon = w3_icon('', 'fa-refresh fa-spin', 20);
 
@@ -1128,9 +1143,19 @@ function network_html()
          w3_label('w3-show-inline-block w3-margin-R-16 w3-margin-T-8 w3-text-teal', 'Status:') +
          w3_div('id-ip-blacklist-status w3-show-inline-block w3-text-black w3-background-pale-aqua', '')
       ) +
-		'<hr>' +
-		w3_div('w3-container', 'TODO: throttle #chan MB/dy GB/mo, hostname') +
-		'<hr>';
+
+    '<hr>' +
+    w3_half('w3-margin-bottom w3-text-teal', 'w3-container',
+        w3_div('w3-restart',
+            w3_input_get('id-proxy-server', 'Proxy server hostname', 'adm.proxy_server', 'network_proxy_server_cb'),
+            w3_div('w3-text-black',
+               'Change <b>only</b> if you have implemented a private proxy server. <br>' +
+               'Set to "proxy.kiwisdr.com" for the default proxy service.'
+            )
+        ),
+        w3_div()
+    ) +
+    '<hr>';
 
 	// FIXME replace this with general instantiation call from w3_input()
 	setTimeout(function() {
@@ -1139,6 +1164,16 @@ function network_html()
 	}, 500);
 	
 	return w3_div('id-network w3-hide', s1 + s2 + s3);
+}
+
+function network_proxy_server_cb(path, val)
+{
+   val = val.trim();
+   if (val == '') {
+      val = 'proxy.kiwisdr.com';
+      w3_set_value('id-proxy-server', val);
+   }
+	w3_string_set_cfg_cb(path, val);
 }
 
 function network_ip_blacklist_cb(path, val)
@@ -1511,7 +1546,7 @@ function gps_html()
 
 	   w3_div('w3-valign',
          w3_div('id-gps-loading-maps w3-container w3-section w3-card-8 w3-round-xlarge w3-pale-blue|width:100%',
-            'loading maps...'
+            'loading map...'
          ),
          w3_div('id-gps-channels w3-container w3-section w3-card-8 w3-round-xlarge w3-pale-blue|width:100%',
             w3_table('id-gps-ch w3-table-6-8 w3-striped')
@@ -2798,8 +2833,8 @@ function admin_recv(data)
 				admin_sdr_mode = (+param[1])? 0:1;
 				break;
 
-			case "BBAI":
-				admin.BBAI = true;
+			case "rx14_wf0":
+				admin.rx14_wf0 = true;
 				break;
 
 			case "init":
